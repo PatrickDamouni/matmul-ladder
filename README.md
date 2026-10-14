@@ -1,5 +1,7 @@
 # matmul-ladder
 
+[![ci](https://github.com/PatrickDamouni/matmul-ladder/actions/workflows/ci.yml/badge.svg)](https://github.com/PatrickDamouni/matmul-ladder/actions/workflows/ci.yml)
+
 Single-precision matrix multiply (`C = A × B`) in C++, made faster one rung at a time on Apple Silicon. Every rung is measured and checked for correctness.
 
 ```
@@ -17,6 +19,8 @@ make asan               # same tests under AddressSanitizer + UBSan
 make bench              # full benchmark (~1 min); `make bench-quick` for n ≤ 512
 make sweep              # tile-shape experiment behind "Why did tiling lose?"
 ```
+
+**Linux (ARM64):** `make test` and `make asan` build with GCC's bundled OpenMP (`sudo apt install build-essential`). CI runs both on GitHub's `ubuntu-24.04-arm` runner, plus tests, sanitizers and a quick bench on macOS. The bench links Apple Accelerate, so it is macOS-only for now.
 
 ## Results
 
@@ -93,7 +97,7 @@ The tests were checked by planting a bug (dropping the edge-row path in rung 4),
 ## Limitations
 
 - Square matrices only; row-major only.
-- The NEON rung requires ARM (Apple Silicon or ARM Linux). The bench links Apple Accelerate, so it is macOS-only.
+- ARM64 only: the NEON rung needs Apple Silicon or ARM Linux. Tests run on both; the bench links Apple Accelerate, so it is macOS-only.
 - B is not packed, and there is no prefetching or k-loop unrolling yet. Those are the obvious next steps toward Accelerate.
 - Timings come from a laptop with background load, and no run-to-run variance is reported yet.
 

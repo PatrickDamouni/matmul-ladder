@@ -1,0 +1,37 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  linux-arm64:
+    name: Linux arm64 (GCC) — tests + sanitizers
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: g++ --version && uname -m && nproc
+      # ASan's shadow memory can collide with the high-entropy ASLR that newer
+      # Ubuntu kernels enable; dropping mmap randomness to 28 bits avoids it.
+      - name: Make ASan-compatible
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - name: Tests
+        run: make test
+      - name: Tests under ASan + UBSan
+        run: make asan
+
+  macos-arm64:
+    name: macOS arm64 (Apple clang) — tests + quick bench
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenMP runtime
+        run: brew install libomp
+      - name: Tests
+        run: make test
+      - name: Tests under ASan + UBSan
+        run: make asan
+      - name: Quick bench (also checks every kernel against Accelerate)
+        run: make bench-quick
