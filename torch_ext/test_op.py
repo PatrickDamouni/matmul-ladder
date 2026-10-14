@@ -44,14 +44,27 @@ def main() -> int:
         print(f"{'FAIL' if failures > before else 'ok  '} {name}")
 
     # Bad inputs must raise, not crash.
-    for bad in (torch.rand(4, 5), torch.rand(4, 4, dtype=torch.float64)):
-        try:
-            torch.ops.matmul_ladder.mm_neon(bad, bad)
-        except RuntimeError:
-            pass
-        else:
-            print(f"FAIL: accepted bad input {tuple(bad.shape)} {bad.dtype}")
-            failures += 1
+    # The oversized cases are stride-0 expand() views, so they cost no memory:
+    # n = 2^20 + 1 trips the size limit, and n = 2^31 + 1 would wrap negative if
+    # the int64 -> int cast were unchecked.
+    # Each case must fail with *our* check's message -- an allocation failure
+    # deeper in PyTorch would also raise RuntimeError and hide a missing check.
+    bad_inputs = [
+        (torch.rand(4, 5), "square"),
+        (torch.rand(4, 4, dtype=torch.float64), "float32"),
+        (torch.zeros(1).expand(2**20 + 1, 2**20 + 1), "supported maximum"),
+        (torch.zeros(1).expand(2**31 + 1, 2**31 + 1), "supported maximum"),
+    ]
+    for name, op in ops.items():
+        for bad, expected in bad_inputs:
+            try:
+                op(bad, bad)
+                print(f"FAIL: {name} accepted bad input {tuple(bad.shape)} {bad.dtype}")
+                failures += 1
+            except RuntimeError as e:
+                if expected not in str(e):
+                    print(f"FAIL: {name} {tuple(bad.shape)}: wrong error: {str(e).splitlines()[0]}")
+                    failures += 1
 
     print("\nall PyTorch op checks passed" if not failures else f"\n{failures} failures")
     return 1 if failures else 0

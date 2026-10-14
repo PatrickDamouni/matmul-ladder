@@ -129,6 +129,10 @@ What I learned building it:
 
 The tests were checked by planting a bug (dropping the edge-row path in rung 4), which they caught as 24 failing cases.
 
+**Index overflow (fixed).** The first version computed offsets like `i * n` in 32-bit `int`. That overflows once n ≥ 46,341, which is undefined behaviour and in practice an out-of-bounds read or write, and the PyTorch op accepted any size. The tests stop at n = 300, so neither the tests nor the sanitizers could see it. All kernels now index with a 64-bit row stride. `matmul.h` documents the contract `n ≤ 2^20`, and the PyTorch op enforces it with `TORCH_CHECK`.
+
+A negative test passes zero-memory `expand()` views of n = 2^20 + 1 and n = 2^31 + 1, and checks for the op's own error message. With the check removed, that test process is killed by the OS while trying to allocate the 4 TB matrix. The 64-bit indexing itself has not been run at n ≥ 46,341, which would need about 26 GB of RAM.
+
 ## Limitations
 
 - Square matrices only; row-major only.

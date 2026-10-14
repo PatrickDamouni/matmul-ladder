@@ -26,6 +26,10 @@ void check_inputs(const at::Tensor& a, const at::Tensor& b) {
     TORCH_CHECK(a.size(0) == a.size(1) && a.sizes() == b.sizes(),
                 "mm_neon: only square n x n inputs of equal size are supported, got ",
                 a.sizes(), " and ", b.sizes());
+    // The kernels take n as int; refuse anything past the documented contract
+    // (matmul.h) instead of letting the int64 -> int cast below wrap around.
+    TORCH_CHECK(a.size(0) <= kMaxN, "mm_neon: n = ", a.size(0),
+                " exceeds the supported maximum of ", kMaxN);
 }
 
 }  // namespace
