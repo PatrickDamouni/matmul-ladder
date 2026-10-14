@@ -1,0 +1,4 @@
+build/
+results/latest.csv
+.DS_Store
+.env
