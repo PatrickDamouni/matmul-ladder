@@ -15,6 +15,7 @@ brew install libomp     # OpenMP runtime; Apple clang doesn't ship one
 make test               # correctness: 5 kernels × 18 sizes vs a double-precision reference
 make asan               # same tests under AddressSanitizer + UBSan
 make bench              # full benchmark (~1 min); `make bench-quick` for n ≤ 512
+make sweep              # tile-shape experiment behind "Why did tiling lose?"
 ```
 
 ## Results
@@ -43,19 +44,39 @@ Values are GFLOP/s (higher is better), computed as `2·n³ / time`. Raw output i
 
 1. **naive (i-j-k).** The inner loop walks *down a column* of B, a stride of `n` floats, so nearly every load is a cache miss at large n. Performance gets *worse* as n grows: 3.3 → 1.7 GFLOP/s.
 2. **reorder (i-k-j).** Same math, loops swapped. The inner loop now streams across contiguous rows of B and C, and clang auto-vectorizes it. The one-line change gives 10–20×.
-3. **tiled.** 64×64 cache blocks. **This made things slower**, not faster. See the open question below.
+3. **tiled.** 64×64 cache blocks. **This made things slower**, not faster. See "Why did tiling lose?" below.
 4. **neon.** A hand-written 4×16 micro-kernel. A 4-row by 16-column block of C stays in 16 NEON registers for a 256-deep k-panel. Each k step does 4 vector loads of B and 16 fused multiply-adds (`vfmaq_n_f32`), and C is touched only once per panel instead of every step.
 5. **omp.** Rung 4 split across threads by rows of C (`schedule(dynamic)`, 32-row tasks). Rows are independent, so no locking is needed.
 
-## Open question: why did tiling lose?
+## Why did tiling lose?
 
-The textbook says blocking should help, but on this machine it lost to plain loop reordering at every size. These are hypotheses I haven't verified yet:
+The textbook says blocking should help, but on this machine 64×64×64 tiles lost to plain loop reordering at every size. `make sweep` ([`bench/tile_sweep.cpp`](bench/tile_sweep.cpp)) runs the *same* tiled code as rung 3 with different block shapes. All other conditions are held fixed.
 
-- **The tiles shorten the vectorized inner loop** from `n` iterations to 64, which adds loop overhead and prologue/epilogue cost per tile.
-- **M4's caches are large** (128 KB L1d per performance core, 16 MB shared L2), so the reorder loop's working set may already fit well enough that blocking has nothing to fix at these sizes.
-- **C is still loaded and stored on every k step.** Blocking alone doesn't fix that. Register blocking (rung 4) does.
+| variant (n = 2048) | GFLOP/s min / median / max |
+|---|---:|
+| 2-reorder (no tiling) | 30.4 / 32.5 / 32.7 |
+| tiled i16 k16 **j16** | 12.5 / 12.6 / 12.6 |
+| tiled i64 k64 **j64** (rung 3) | 19.2 / 19.8 / 19.8 |
+| tiled i64 k64 **j128** | 22.9 / 23.0 / 23.0 |
+| tiled i64 k64 **j256** | 27.3 / 27.4 / 27.5 |
+| tiled i64 k64 **j = full row** | 32.7 / 32.9 / 33.0 |
+| tiled i64 k256 j = full row | 32.5 / 32.8 / 32.9 |
 
-Next step: profile rungs 2 and 3 with Instruments (CPU Counters) and compare L1/L2 miss rates, then sweep the block size.
+Full output, including n = 1024: [`results/tile-sweep-m4pro-2026-10-14.md`](results/tile-sweep-m4pro-2026-10-14.md).
+
+**The answer: the j tile made the inner loop too short.** Only the width of the innermost (j) loop matters:
+
+- Widen it from 64 to the full row and the loss disappears completely (32.9 vs. 32.5).
+- Shrink it to 16 and performance drops further, to 12.6.
+- Changing the k block (64 → 256) does nothing.
+
+Clang vectorizes this loop 4 floats wide and unrolls it 4×, so a 64-float j tile is only 4 trips through the vector body before paying loop setup and teardown again. Meanwhile there was **no cache problem to fix**. The reorder loop streams one row of B and one row of C (8 KB each at n = 2048), and the M4 Pro's performance cores have 128 KB of L1d and 16 MB of L2.
+
+What this does *not* show, so I'm not claiming it:
+
+- **I haven't measured cache-miss counters.** This is a controlled timing experiment, not a hardware-counter profile.
+- **The curve isn't perfectly monotonic.** At n = 1024, j512 is slightly slower than j256. I don't have an explanation yet.
+- **The real limit of rungs 2 and 3 is probably load/store traffic.** Every multiply-add also loads and stores C. That is a hypothesis; rung 4's 3× jump from keeping C in registers fits it, but doesn't prove it.
 
 ## Other things the data shows
 
@@ -78,16 +99,18 @@ The tests were checked by planting a bug (dropping the edge-row path in rung 4),
 
 ## Roadmap
 
-- [ ] Profile rungs 2 vs 3 and resolve the tiling question
+- [x] Resolve the tiling question (`make sweep`: the inner loop was too short)
+- [ ] Confirm with hardware counters (Instruments CPU Counters)
 - [ ] Pack B panels; try 8×12 and 6×16 micro-kernels
-- [ ] Report the spread (min/median/max) alongside the median
+- [ ] Report the spread (min/median/max) in the main bench, not just the sweep
 - [ ] Port to CUDA (Colab T4): naive → shared-memory tiling → register tiling, profiled with Nsight Compute, compared against cuBLAS
 
 ## Layout
 
 ```
 include/matmul.h      kernel signatures + the ladder table
-src/                  one file per rung (neon_rows.h is shared by rungs 4 and 5)
+src/                  one file per rung (neon_rows.h shared by rungs 4-5, tiled_impl.h by rung 3 + sweep)
 tests/test_matmul.cpp correctness vs double-precision reference
 bench/bench.cpp       timing, GFLOP/s, Accelerate check, thread sweep
+bench/tile_sweep.cpp  block-shape experiment for rung 3
 ```

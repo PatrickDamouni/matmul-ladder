@@ -11,7 +11,7 @@ LDLIBS   := -L$(LIBOMP)/lib -lomp
 SRC := $(wildcard src/*.cpp)
 HDR := $(wildcard include/*.h src/*.h)
 
-.PHONY: all test bench bench-quick asan clean
+.PHONY: all test bench bench-quick sweep asan clean
 
 all: build/test build/bench
 
@@ -20,6 +20,9 @@ build/test: $(SRC) tests/test_matmul.cpp $(HDR) | build
 
 build/bench: $(SRC) bench/bench.cpp $(HDR) | build
 	$(CXX) $(CXXFLAGS) $(SRC) bench/bench.cpp -o $@ $(LDLIBS) -framework Accelerate
+
+build/tile_sweep: $(SRC) bench/tile_sweep.cpp $(HDR) | build
+	$(CXX) $(CXXFLAGS) $(SRC) bench/tile_sweep.cpp -o $@ $(LDLIBS)
 
 # Same tests under AddressSanitizer + UndefinedBehaviorSanitizer.
 build/test-asan: $(SRC) tests/test_matmul.cpp $(HDR) | build
@@ -37,6 +40,9 @@ bench: build/bench | results
 
 bench-quick: build/bench | results
 	./build/bench --quick
+
+sweep: build/tile_sweep
+	./build/tile_sweep
 
 build results:
 	mkdir -p $@
