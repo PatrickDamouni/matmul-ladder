@@ -22,7 +22,7 @@ CXXFLAGS := -std=c++17 -O3 $(WARN) -Iinclude $(OMPFLAGS)
 SRC := $(wildcard src/*.cpp)
 HDR := $(wildcard include/*.h src/*.h)
 
-.PHONY: all test bench bench-quick sweep asan clean
+.PHONY: all test bench bench-quick sweep asan torch-setup torch-test torch-bench clean
 
 ifeq ($(UNAME),Darwin)
 all: build/test build/bench
@@ -63,8 +63,23 @@ bench-quick: build/bench | results
 sweep: build/tile_sweep
 	./build/tile_sweep
 
+# PyTorch custom-op bridge (macOS arm64). Uses a local .venv; ninja must be on
+# PATH for torch's JIT extension build, hence the absolute PATH prefix.
+VENV  := $(CURDIR)/.venv
+TORCH := cd torch_ext && PATH=$(VENV)/bin:$$PATH $(VENV)/bin/python
+
+torch-setup:
+	uv venv -q --python 3.14 $(VENV)
+	uv pip install -q --python $(VENV)/bin/python -r torch_ext/requirements.txt
+
+torch-test:
+	$(TORCH) test_op.py
+
+torch-bench:
+	$(TORCH) bench_op.py
+
 build results:
 	mkdir -p $@
 
 clean:
-	rm -rf build
+	rm -rf build torch_ext/__pycache__

@@ -10,6 +10,8 @@ Single-precision matrix multiply (`C = A × B`) in C++, made faster one rung at 
 
 **Headline (M4 Pro, n = 2048):** a hand-written NEON kernel reaches **90 GFLOP/s on one core**, 2.7× the compiler's auto-vectorized loop. Across 12 threads it reaches **626 GFLOP/s**, about **22 % of Apple Accelerate**.
 
+**Skills shown:** C++17, ARM NEON SIMD intrinsics, OpenMP, cache and register blocking, benchmarking methodology, AddressSanitizer/UBSan, Linux + macOS CI (GitHub Actions), PyTorch C++ custom operators, Python.
+
 ## Quick start
 
 ```bash
@@ -88,6 +90,39 @@ What this does *not* show, so I'm not claiming it:
 - **Speedup vs. naive flatters itself at large n**, because naive collapses (1.7 GFLOP/s). The honest single-core comparison is rung 4 vs. rung 2: **2.7×** at n=2048, against what the compiler does on its own.
 - **Accelerate is 4.5× faster than rung 5.** It likely uses Apple's dedicated matrix hardware (AMX/SME) rather than NEON, so it's a ceiling to measure against, not a target this approach can reach.
 
+## PyTorch bridge
+
+[`torch_ext/op.cpp`](torch_ext/op.cpp) registers rung 4 as PyTorch custom operators with `TORCH_LIBRARY`:
+
+- `torch.ops.matmul_ladder.mm_neon(a, b)` runs on one thread.
+- `torch.ops.matmul_ladder.mm_neon_parallel(a, b)` splits rows over PyTorch's own thread pool (`at::parallel_for`).
+
+[`torch_ext/test_op.py`](torch_ext/test_op.py) checks both against a float64 `torch.matmul` reference on the same 18 sizes. It also passes a transposed (non-contiguous) input, rejects bad dtypes and shapes, and runs `torch.library.opcheck`.
+
+```bash
+make torch-setup    # .venv with torch 2.14.1 + ninja (uses uv)
+make torch-test
+make torch-bench
+```
+
+| n | mm_neon (1 thr) | torch.matmul (1 thr) | mm_neon_parallel (8 thr) | torch.matmul (8 thr) | torch.matmul on MPS (GPU) |
+|---:|---:|---:|---:|---:|---:|
+| 256 | 100 | 1625 | 420 | 1624 | 267 |
+| 512 | 101 | 2720 | 681 | 2716 | 1539 |
+| 1024 | 97 | 3114 | 688 | 3111 | 3799 |
+| 2048 | 90 | 3161 | 605 | 3149 | 5140 |
+
+GFLOP/s, median from `torch.utils.benchmark.Timer.blocked_autorange`. Raw output: [`results/torch-m4pro-2026-10-14.md`](results/torch-m4pro-2026-10-14.md).
+
+What I learned building it:
+
+- **The first version of `mm_neon_parallel` was secretly single-threaded** (101 GFLOP/s on "8 threads").
+  - Cause: this torch build sets `AT_PARALLEL_OPENMP 1`, and `at::parallel_for` is a header template, so its `#pragma omp parallel` compiles *inside my extension*. I had built the extension without `-fopenmp`, so the compiler silently dropped the pragma.
+  - Fix: compile with OpenMP and link **torch's own bundled `libomp.dylib`**, so the process still loads exactly one OpenMP runtime (checked with `vmmap`).
+  - Result: 605 GFLOP/s, matching standalone rung 5 on 8 threads (603).
+- **On CPU, `torch.matmul` is Apple Accelerate.** This torch build reports `BLAS_INFO=accelerate`. Its speed doesn't change between 1 and 8 PyTorch threads, so Accelerate manages its own hardware and ignores PyTorch's thread setting. The "1 thr" column is therefore not truly single-core.
+- **The Apple GPU (MPS) only wins at larger sizes.** At n=256, launch and sync overhead make it slower than the CPU path. It overtakes CPU Accelerate from n≈1024. The timed statement includes `torch.mps.synchronize()`, because MPS launches are asynchronous.
+
 ## Correctness
 
 `tests/test_matmul.cpp` checks every kernel against a double-precision reference on 18 sizes (1, 2, 3, 4, 5, 15, 16, 17, 31, 33, 63, 64, 65, 100, 129, 255, 256, 300). Odd sizes are deliberate: they exercise the ragged edges of the 4×16 micro-kernel and the 64-wide tiles. The per-element tolerance is `2 · n · ε · Σ|a·b|`, derived from the float32 rounding bound, not a magic constant. Output buffers are pre-filled with NaN, so a kernel that skips an element fails the test.
@@ -97,6 +132,7 @@ The tests were checked by planting a bug (dropping the edge-row path in rung 4),
 ## Limitations
 
 - Square matrices only; row-major only.
+- The PyTorch bridge is macOS arm64 only. It links torch's bundled `libomp.dylib` with Apple-clang flags.
 - ARM64 only: the NEON rung needs Apple Silicon or ARM Linux. Tests run on both; the bench links Apple Accelerate, so it is macOS-only.
 - B is not packed, and there is no prefetching or k-loop unrolling yet. Those are the obvious next steps toward Accelerate.
 - Timings come from a laptop with background load, and no run-to-run variance is reported yet.
@@ -107,6 +143,7 @@ The tests were checked by planting a bug (dropping the edge-row path in rung 4),
 - [ ] Confirm with hardware counters (Instruments CPU Counters)
 - [ ] Pack B panels; try 8×12 and 6×16 micro-kernels
 - [ ] Report the spread (min/median/max) in the main bench, not just the sweep
+- [x] Expose the kernel to PyTorch as a custom op (`torch_ext/`)
 - [ ] Port to CUDA (Colab T4): naive → shared-memory tiling → register tiling, profiled with Nsight Compute, compared against cuBLAS
 
 ## Layout
@@ -117,4 +154,5 @@ src/                  one file per rung (neon_rows.h shared by rungs 4-5, tiled_
 tests/test_matmul.cpp correctness vs double-precision reference
 bench/bench.cpp       timing, GFLOP/s, Accelerate check, thread sweep
 bench/tile_sweep.cpp  block-shape experiment for rung 3
+torch_ext/            PyTorch custom ops (op.cpp), loader, tests, benchmark
 ```
